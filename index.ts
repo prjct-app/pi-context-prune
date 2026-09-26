@@ -33,7 +33,8 @@
 //      PI_PRUNE_DEBUG=1 muestra lo podado en el status
 //
 // ESTADO: una linea en la barra de modos de pi-tui-kit, arriba del editor. No
-// bloquea nada: dice cuanta memoria hay en contexto y cuanta se ha retirado.
+// bloquea nada. La linea "memory" es de pi-memory; esta solo aparece con
+// PI_PRUNE_DEBUG=1 (tokens de snapshots en contexto y los retirados).
 //
 // @ts-nocheck
 import { createHash } from "node:crypto";
@@ -102,14 +103,18 @@ export default function (pi: ExtensionAPI) {
 	let retired = new Map<string, number>();
 	let inContext = 0;
 
-	/** La linea de estado: memoria viva y retirada. Nada mientras no hay memoria. */
+	/**
+	 * La linea "memory" arriba del editor es de pi-memory: dice cuantos recuerdos
+	 * tiene el modelo y cuantos se trajeron para el prompt. Aqui solo se ven los
+	 * tokens de snapshots y lo podado, con PI_PRUNE_DEBUG=1.
+	 */
 	const showStatus = (ctx: any): void => {
-		if (!CFG.memory) return;
+		if (!CFG.memory || !CFG.debug) return;
 		const pruned = [...retired.values()].reduce((sum, tokens) => sum + tokens, 0);
-		const parts = [`memory ${short(inContext)}`];
+		const parts = [`memory snapshots ${short(inContext)}`];
 		if (pruned) parts.push(`-${short(pruned)} pruned`);
 		if (memoryNow) parts.push("prune queued");
-		setMode(ctx, "memory", inContext || pruned || memoryNow ? parts.join(" · ") : undefined);
+		setMode(ctx, "prune", inContext || pruned || memoryNow ? parts.join(" · ") : undefined);
 	};
 
 	pi.on("session_start", (_event: any, ctx: any) => {
