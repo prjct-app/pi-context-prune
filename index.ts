@@ -37,6 +37,7 @@
 // PI_PRUNE_DEBUG=1 (tokens de snapshots en contexto y los retirados).
 //
 // @ts-nocheck
+import { installCacheGuard } from "./cache-guard.ts";
 import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { setMode } from "@prjct.app/pi-tui-kit";
@@ -86,6 +87,9 @@ export const memoryItems = (input: any[]): MemoryItem[] => {
 };
 
 export default function (pi: ExtensionAPI) {
+	// Calentamiento de cache y aviso al cambiar de modelo: ver cache-guard.ts.
+	// Van antes de PI_PRUNE=0, que apaga solo las podas.
+	installCacheGuard(pi);
 	if (!CFG.enabled) return;
 
 	// Ordinal del ultimo reasoning podado. La historia es append-only, asi que
