@@ -1,7 +1,7 @@
 {
   "name": "@prjct.app/pi-context-prune",
-  "version": "0.1.0",
-  "description": "Pi extension: prune large context windows with explicit operator confirmation",
+  "version": "0.1.1",
+  "description": "Prune superseded Pi memory snapshots and optionally provider reasoning payloads; guard cache costs on model switches.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -14,26 +14,41 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/prjct-app/pi-local-extensions/main/pi-context-prune/docs/cover-v2.png"
   },
   "engines": {
     "node": ">=22.19.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/prjct-app/pi-context-prune.git"
+    "url": "git+https://github.com/prjct-app/pi-local-extensions.git",
+    "directory": "pi-context-prune"
   },
   "bugs": {
-    "url": "https://github.com/prjct-app/pi-context-prune/issues"
+    "url": "https://github.com/prjct-app/pi-local-extensions/issues"
   },
-  "homepage": "https://github.com/prjct-app/pi-context-prune#readme",
+  "homepage": "https://github.com/prjct-app/pi-local-extensions/tree/main/pi-context-prune#readme",
   "files": [
     "cache-guard.ts",
-    "index.ts"
+    "index.ts",
+    "README.md",
+    "LICENSE",
+    "docs/cover.png",
+    "docs/cover-v2.png"
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check:package": "npm pack --dry-run --ignore-scripts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@prjct.app/pi-tui-kit": "^0.3.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
 }
