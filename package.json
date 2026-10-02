@@ -1,5 +1,39 @@
 {
-  "name": "pi-context-prune",
-  "private": true,
-  "type": "module"
+  "name": "@prjct.app/pi-context-prune",
+  "version": "0.1.0",
+  "description": "Pi extension: prune large context windows with explicit operator confirmation",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "context",
+    "prune"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prjct-app/pi-context-prune.git"
+  },
+  "bugs": {
+    "url": "https://github.com/prjct-app/pi-context-prune/issues"
+  },
+  "homepage": "https://github.com/prjct-app/pi-context-prune#readme",
+  "files": [
+    "cache-guard.ts",
+    "index.ts"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {}
 }
