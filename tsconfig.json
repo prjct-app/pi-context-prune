@@ -9,5 +9,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["cache-guard.ts", "tests/*.ts"]
+  "include": ["*.ts", "tests/*.ts"]
 }

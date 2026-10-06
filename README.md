@@ -1,6 +1,6 @@
 # Pi context controls
 
-[![pi-context-prune — for PI Agent](https://raw.githubusercontent.com/prjct-app/pi-local-extensions/main/pi-context-prune/docs/cover-v2.png)](https://pi.dev)
+[![pi-context-prune — for PI Agent](https://raw.githubusercontent.com/prjct-app/pi-context-prune/main/docs/cover-v2.png)](https://pi.dev)
 
 ```sh
 pi install npm:@prjct.app/pi-context-prune
