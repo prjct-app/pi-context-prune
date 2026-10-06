@@ -43,7 +43,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { setMode } from "@prjct.app/pi-tui-kit";
 
 const CFG = {
-	enabled: process.env.PI_PRUNE !== "0",
+	// Pi owns compaction. Payload pruning requires an explicit opt-in.
+	enabled: process.env.PI_PRUNE === "1",
 	memory: process.env.PI_PRUNE_MEMORY !== "0",
 	memoryAdvance: Math.max(1, Number(process.env.PI_PRUNE_MEMORY_ADVANCE || 3_000)),
 	// MEDIDO 2026-09-20: el encrypted_content del reasoning NO se factura como
@@ -77,10 +78,12 @@ export const memoryItems = (input: any[]): MemoryItem[] => {
 	const found: MemoryItem[] = [];
 	for (let i = 0; i < input.length; i++) {
 		const item = input[i];
-		if (item?.role !== "user" && item?.type !== "message") continue;
-		const text = JSON.stringify(item?.content ?? "");
-		const snapshot = text.includes("<memory_snapshot");
-		if (!snapshot && !text.includes("<retained_memory")) continue;
+		if (item?.role !== "user") continue;
+		const content = item?.content;
+		const text = typeof content === "string" ? content : Array.isArray(content)
+			? content.map(block => block?.type === "input_text" || block?.type === "text" ? block.text ?? "" : "").join("\n") : "";
+		const snapshot = /^<memory_snapshot revision="[^"\n]+" trust="untrusted">\nThis snapshot /u.test(text);
+		if (!snapshot && !/^<retained_memory trust="untrusted">\n/u.test(text)) continue;
 		found.push({ index: i, key: keyOf(item), snapshot, tokens: Math.round(text.length / 4) });
 	}
 	return found;
@@ -150,7 +153,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		// Solo, lo que el ultimo snapshot declara superado, cuando pesa lo bastante.
-		const superseded = lastSnapshot > 0 ? items.slice(0, lastSnapshot) : [];
+		const superseded = lastSnapshot > 0 ? items.slice(0, lastSnapshot).filter(item => item.snapshot) : [];
 		const pending = superseded.reduce((sum, item) => sum + item.tokens, 0);
 		if (pending >= CFG.memoryAdvance) {
 			for (const item of superseded) droppedMemory.add(item.key);

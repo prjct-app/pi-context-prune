@@ -1,6 +1,6 @@
 {
   "name": "@prjct.app/pi-context-prune",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Prune superseded Pi memory snapshots and optionally provider reasoning payloads; guard cache costs on model switches.",
   "type": "module",
   "license": "MIT",

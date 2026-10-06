@@ -43,10 +43,12 @@ function harness(tokens: number, mode = 'tui') {
   return { select, notes, opened, set };
 }
 
-test('a switch with a large context opens the docked choice; small ones and restores do not', async () => {
+test('a model switch preserves context without recommending compaction or changing the model', async () => {
   const big = harness(117_000);
   await big.select(mimo, sol);
-  assert.equal(big.opened.length, 1);
+  assert.equal(big.opened.length, 0);
+  assert.deepEqual(big.set, []);
+  assert.match(big.notes[0]!, /re-sends 117k/);
   const small = harness(20_000);
   await small.select(mimo, sol);
   assert.equal(small.opened.length, 0);

@@ -6,10 +6,6 @@
 // need cost and promptCache on the models (~/.pi/agent/models.json,
 // modelOverrides); without prices Pi goes blind to the cache.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SYMBOL, openPanel, type PanelItem } from "@prjct.app/pi-tui-kit";
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 /** Below this, a switch re-sends too little to be worth an interruption. */
 export const SWITCH_WARN_TOKENS = Number(process.env.PI_SWITCH_WARN_TOKENS) || 50_000;
@@ -23,14 +19,6 @@ const missPrice = (model: Model | undefined): number => perM(model, "cacheWrite"
 const same = (a: Model | undefined, b: Model | undefined): boolean => !!a && !!b && a.provider === b.provider && a.id === b.id;
 const label = (model: Model): string => `${model.provider}/${model.id}`;
 const k = (tokens: number): string => `${Math.round(tokens / 1000)}k`;
-
-/** Tokens compaction keeps verbatim; the rest becomes a summary. */
-function keepRecentTokens(): number {
-  try {
-    const settings = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "settings.json"), "utf8"));
-    return Number(settings?.compaction?.keepRecentTokens) || 20_000;
-  } catch { return 20_000; }
-}
 
 /**
  * Warm when the avoided miss, weighted by the chance another request arrives,
@@ -60,70 +48,13 @@ export function installCacheGuard(pi: ExtensionAPI): void {
     return action ? { action } : undefined;
   });
 
-  // Our own setModel calls fire model_select too; they are not a person's switch.
-  const own = { active: false };
-  const setModel = async (model: Model): Promise<boolean> => {
-    own.active = true;
-    try { return await pi.setModel(model as never); } finally { own.active = false; }
-  };
-
-  const ask = async (ctx: ExtensionContext, from: Model, to: Model, tokens: number): Promise<void> => {
-    const { summary } = switchCost(from, to, tokens);
-    const keep = keepRecentTokens();
-    const options: (PanelItem & { run: () => Promise<void> | void; note: string })[] = [
-      {
-        id: "compact", label: `Compact with ${from.id} first, then switch`, symbol: SYMBOL.ok, tone: "success", meta: "recommended",
-        note: `The summary is written by ${from.id} while its cache is warm; ${to.id} then reads about ${k(Math.min(tokens, keep + 8_000))} instead of ${k(tokens)}.`,
-        run: async () => {
-          if (!(await setModel(from))) { ctx.ui.notify(`Could not return to ${label(from)}; nothing was compacted.`, "error"); return; }
-          ctx.ui.notify(`Compacting with ${from.id}; ${to.id} takes over when it finishes.`, "info");
-          ctx.compact({
-            onComplete: () => { void setModel(to).then(ok => ctx.ui.notify(ok ? `Compacted. Now on ${label(to)}.` : `Compacted, but could not switch to ${label(to)}.`, ok ? "info" : "error")); },
-            onError: (error: Error) => { void setModel(to); ctx.ui.notify(`Compaction failed (${error.message}); switched to ${label(to)} anyway.`, "warning"); },
-          });
-        },
-      },
-      {
-        id: "back", label: `Stay on ${from.id}`, symbol: SYMBOL.idle, tone: "muted", meta: "no cost",
-        note: `Keeps the warm cache of ${from.id}. Switch later, right after a compaction or in a new session.`,
-        run: async () => { if (!(await setModel(from))) ctx.ui.notify(`Could not return to ${label(from)}.`, "error"); },
-      },
-      {
-        id: "switch", label: `Switch to ${to.id} anyway`, symbol: SYMBOL.attention, tone: "warning", meta: `re-sends ${k(tokens)}`,
-        note: summary,
-        run: () => {},
-      },
-    ];
-    await openPanel(ctx as unknown as Parameters<typeof openPanel>[0], {
-      title: "Model switch",
-      summary: () => `${k(tokens)} of context · ${from.id} → ${to.id}`,
-      items: () => options,
-      detail: item => {
-        const option = options.find(o => o.id === item.id)!;
-        return { title: option.label, fields: [{ label: "cost", value: summary, tone: "warning" }], sections: [{ title: "What happens", lines: [option.note] }] };
-      },
-      activate: {
-        label: "Choose",
-        run: async (item, panel) => {
-          panel.close();
-          await options.find(o => o.id === item?.id)?.run();
-        },
-      },
-      initial: "compact",
-    });
-  };
-
+  // A model switch preserves the complete context. Cost alone must never
+  // recommend replacing the conversation with a summary.
   pi.on("model_select", (event: any, ctx: ExtensionContext) => {
-    if (own.active || event.source === "restore") return;
+    if (event.source === "restore") return;
     const from = event.previousModel as Model | undefined, to = event.model as Model | undefined;
     if (!from || !to || same(from, to)) return;
     const tokens = ctx.getContextUsage()?.tokens ?? 0;
-    if (tokens < SWITCH_WARN_TOKENS) return;
-    if (!ctx.hasUI || ctx.mode !== "tui") {
-      if (ctx.hasUI) ctx.ui.notify(switchCost(from, to, tokens).summary, "warning");
-      return;
-    }
-    // Opened after the switch settles: a docked panel inside the event would hold it up.
-    setTimeout(() => { void ask(ctx, from, to, tokens).catch(error => ctx.ui.notify(`Model switch guard: ${error instanceof Error ? error.message : String(error)}`, "error")); }, 0);
+    if (tokens >= SWITCH_WARN_TOKENS && ctx.hasUI) ctx.ui.notify(switchCost(from, to, tokens).summary, "info");
   });
 }
