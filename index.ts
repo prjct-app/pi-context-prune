@@ -76,8 +76,7 @@ type MemoryItem = { index: number; key: string; snapshot: boolean; tokens: numbe
 /** Mensajes de pi-memory en el payload, en orden. */
 export const memoryItems = (input: any[]): MemoryItem[] => {
 	const found: MemoryItem[] = [];
-	for (let i = 0; i < input.length; i++) {
-		const item = input[i];
+	for (const [i, item] of input.entries()) {
 		if (item?.role !== "user") continue;
 		const content = item?.content;
 		const text = typeof content === "string" ? content : Array.isArray(content)
@@ -97,18 +96,19 @@ export default function (pi: ExtensionAPI) {
 
 	// Ordinal del ultimo reasoning podado. La historia es append-only, asi que
 	// los N primeros items de reasoning son estables y el ordinal no se desplaza.
-	let frontier = 0;
-	// Items de memoria ya retirados, por contenido.
-	let droppedMemory = new Set<string>();
-	// Limpieza pedida desde /memory: se aplica en el siguiente request.
-	let memoryNow = false;
-	let lastDropped = 0;
-	let lastTokens = 0;
-	let advances = 0;
-	let memoryAdvances = 0;
+	// Items de memoria ya retirados, por contenido. Limpieza pedida desde /memory: se aplica en el siguiente request.
 	// Tokens de memoria retirados en esta sesion, por contenido (no se cuentan dos veces).
-	let retired = new Map<string, number>();
-	let inContext = 0;
+	const state = {
+		frontier: 0,
+		droppedMemory: new Set<string>(),
+		memoryNow: false,
+		lastDropped: 0,
+		lastTokens: 0,
+		advances: 0,
+		memoryAdvances: 0,
+		retired: new Map<string, number>(),
+		inContext: 0,
+	};
 
 	/**
 	 * La linea "memory" arriba del editor es de pi-memory: dice cuantos recuerdos
@@ -118,37 +118,37 @@ export default function (pi: ExtensionAPI) {
 	const showStatus = (ctx: any): void => {
 		if (!CFG.memory || !CFG.debug) return;
 		const pruned = [...retired.values()].reduce((sum, tokens) => sum + tokens, 0);
-		const parts = [`memory snapshots ${short(inContext)}`];
+		const parts = [`memory snapshots ${short(state.inContext)}`];
 		if (pruned) parts.push(`-${short(pruned)} pruned`);
-		if (memoryNow) parts.push("prune queued");
-		setMode(ctx, "prune", inContext || pruned || memoryNow ? parts.join(" · ") : undefined);
+		if (state.memoryNow) parts.push("prune queued");
+		setMode(ctx, "prune", state.inContext || pruned || state.memoryNow ? parts.join(" · ") : undefined);
 	};
 
 	pi.on("session_start", (_event: any, ctx: any) => {
-		frontier = 0;
-		droppedMemory = new Set();
-		memoryNow = false;
-		lastDropped = 0;
-		lastTokens = 0;
-		advances = 0;
-		memoryAdvances = 0;
-		retired = new Map();
-		inContext = 0;
+		state.frontier = 0;
+		state.droppedMemory = new Set();
+		state.memoryNow = false;
+		state.lastDropped = 0;
+		state.lastTokens = 0;
+		state.advances = 0;
+		state.memoryAdvances = 0;
+		state.retired = new Map();
+		state.inContext = 0;
 		showStatus(ctx);
 	});
 
 	/** Decide que memoria se retira en este request. Solo crece en un lote o a mano. */
 	const pruneMemory = (input: any[]): void => {
-		const items = memoryItems(input).filter((item) => !droppedMemory.has(item.key));
+		const items = memoryItems(input).filter((item) => !state.droppedMemory.has(item.key));
 		const lastSnapshot = items.map((item) => item.snapshot).lastIndexOf(true);
-		if (memoryNow) {
-			memoryNow = false;
+		if (state.memoryNow) {
+			state.memoryNow = false;
 			// Todo menos el ultimo snapshot (las reglas vigentes) y el ultimo recall.
 			const keep = new Set([items[lastSnapshot]?.key, items.at(-1)?.key]);
 			const gone = items.filter((item) => !keep.has(item.key));
 			if (gone.length) {
-				for (const item of gone) droppedMemory.add(item.key);
-				memoryAdvances++;
+				for (const item of gone) state.droppedMemory.add(item.key);
+				state.memoryAdvances++;
 			}
 			return;
 		}
@@ -156,8 +156,8 @@ export default function (pi: ExtensionAPI) {
 		const superseded = lastSnapshot > 0 ? items.slice(0, lastSnapshot).filter(item => item.snapshot) : [];
 		const pending = superseded.reduce((sum, item) => sum + item.tokens, 0);
 		if (pending >= CFG.memoryAdvance) {
-			for (const item of superseded) droppedMemory.add(item.key);
-			memoryAdvances++;
+			for (const item of superseded) state.droppedMemory.add(item.key);
+			state.memoryAdvances++;
 		}
 	};
 
@@ -171,50 +171,49 @@ export default function (pi: ExtensionAPI) {
 
 			if (CFG.memory) {
 				pruneMemory(input);
-				inContext = 0;
+				state.inContext = 0;
 				for (const item of memoryItems(input)) {
-					if (droppedMemory.has(item.key)) {
+					if (state.droppedMemory.has(item.key)) {
 						drop.add(item.index);
-						retired.set(item.key, item.tokens);
-					} else inContext += item.tokens;
+						state.retired.set(item.key, item.tokens);
+					} else state.inContext += item.tokens;
 				}
 				showStatus(ctx);
 			}
 
 			if (CFG.reasoning) {
-				const reasoning: number[] = [];
-				for (let i = 0; i < input.length; i++) if (input[i]?.type === "reasoning") reasoning.push(i);
+				const reasoning = input.flatMap((item, i) => item?.type === "reasoning" ? [i] : []);
 				// La ventana protegida son los `keep` mas recientes: esos nunca se tocan.
 				const boundary = reasoning.length - CFG.keep;
 				if (boundary <= 0) {
 					// La historia encogio (compactacion, /tree, sesion reemplazada): una
 					// frontera vieja podaria la ventana protegida. Retrocede con ella.
-					frontier = 0;
+					state.frontier = 0;
 				} else {
 					// Nunca por delante de la frontera valida actual, por el mismo motivo.
-					if (frontier > boundary) frontier = boundary;
-					if (boundary > frontier) {
-						let pending = 0;
-						for (let k = frontier; k < boundary; k++) pending += tokensOf(input[reasoning[k]]);
+					if (state.frontier > boundary) state.frontier = boundary;
+					if (boundary > state.frontier) {
+						const pending = reasoning.slice(state.frontier, boundary).reduce((sum, index) => sum + tokensOf(input[index]), 0);
 						if (pending >= CFG.advance) {
-							frontier = boundary;
-							advances++;
+							state.frontier = boundary;
+							state.advances++;
 						}
 					}
-					for (const index of reasoning.slice(0, frontier)) drop.add(index);
+					for (const index of reasoning.slice(0, state.frontier)) drop.add(index);
 				}
 			}
 
 			if (!drop.size) return undefined;
-			let freed = 0;
-			const pruned = input.filter((item: unknown, i: number) => {
-				if (!drop.has(i)) return true;
-				freed += tokensOf(item);
-				return false;
-			});
+			// One pass over the payload: this runs on every provider request.
+			const pruned: unknown[] = [];
+			const freed = input.reduce((sum: number, item: unknown, i: number) => {
+				if (drop.has(i)) return sum + tokensOf(item);
+				pruned.push(item);
+				return sum;
+			}, 0);
 
-			lastDropped = drop.size;
-			lastTokens = freed;
+			state.lastDropped = drop.size;
+			state.lastTokens = freed;
 			if (CFG.debug && ctx?.hasUI) {
 				ctx.ui.setStatus("prune", `prune: -${freed} tok (${drop.size} items)`);
 			}
@@ -232,13 +231,13 @@ export default function (pi: ExtensionAPI) {
 		memory: {
 			queue: (ctx: any) => {
 				if (!CFG.memory) return;
-				memoryNow = true;
+				state.memoryNow = true;
 				showStatus(ctx);
 			},
 			status: () => ({
-				inContext,
-				pruned: [...retired.values()].reduce((sum, tokens) => sum + tokens, 0),
-				queued: memoryNow,
+				inContext: state.inContext,
+				pruned: [...state.retired.values()].reduce((sum, tokens) => sum + tokens, 0),
+				queued: state.memoryNow,
 			}),
 		},
 	};
