@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 — 2026-10-12
+
+- Fix: with `PI_PRUNE_DEBUG=1` the status line referenced a variable that no longer existed (introduced in 0.1.3). A regression test now runs the debug path.
+
 ## 0.1.3 — 2026-10-12
 
 - Performance: one pass over the request payload instead of two; this runs on every provider request.

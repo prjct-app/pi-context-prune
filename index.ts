@@ -117,7 +117,7 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const showStatus = (ctx: any): void => {
 		if (!CFG.memory || !CFG.debug) return;
-		const pruned = [...retired.values()].reduce((sum, tokens) => sum + tokens, 0);
+		const pruned = [...state.retired.values()].reduce((sum, tokens) => sum + tokens, 0);
 		const parts = [`memory snapshots ${short(state.inContext)}`];
 		if (pruned) parts.push(`-${short(pruned)} pruned`);
 		if (state.memoryNow) parts.push("prune queued");
