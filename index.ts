@@ -88,156 +88,151 @@ export const memoryItems = (input: any[]): MemoryItem[] => {
 	return found;
 };
 
+/**
+ * Estado de la poda como valor inmutable. Cada request produce un estado nuevo a partir del anterior;
+ * nada se modifica en sitio. La unica celda que cambia es la que guarda el estado vigente.
+ */
+export type PruneState = Readonly<{
+	/** Ordinal del ultimo reasoning podado. La historia es append-only: los N primeros son estables. */
+	frontier: number;
+	/** Items de memoria ya retirados, por contenido. */
+	dropped: ReadonlySet<string>;
+	/** Limpieza pedida desde /memory: se aplica en el siguiente request. */
+	memoryNow: boolean;
+	/** Tokens de memoria retirados en esta sesion, por contenido (no se cuentan dos veces). */
+	retired: ReadonlyMap<string, number>;
+	inContext: number;
+	advances: number;
+	memoryAdvances: number;
+}>;
+
+export type PruneConfig = Readonly<{ memory: boolean; memoryAdvance: number; reasoning: boolean; keep: number; advance: number }>;
+
+export const initialState = (): PruneState => ({
+	frontier: 0, dropped: new Set(), memoryNow: false, retired: new Map(), inContext: 0, advances: 0, memoryAdvances: 0,
+});
+
+export const queueMemoryPrune = (state: PruneState): PruneState => ({ ...state, memoryNow: true });
+
+export const retiredTokens = (state: PruneState): number => [...state.retired.values()].reduce((sum, tokens) => sum + tokens, 0);
+
+/** Que memoria se retira en este request. Solo crece en un lote o a mano. */
+function memoryStep(state: PruneState, input: any[], cfg: PruneConfig): PruneState {
+	const items = memoryItems(input).filter((item) => !state.dropped.has(item.key));
+	const lastSnapshot = items.map((item) => item.snapshot).lastIndexOf(true);
+	if (state.memoryNow) {
+		// Todo menos el ultimo snapshot (las reglas vigentes) y el ultimo recall.
+		const keep = new Set([items[lastSnapshot]?.key, items.at(-1)?.key]);
+		const gone = items.filter((item) => !keep.has(item.key));
+		return gone.length
+			? { ...state, memoryNow: false, dropped: new Set([...state.dropped, ...gone.map((item) => item.key)]), memoryAdvances: state.memoryAdvances + 1 }
+			: { ...state, memoryNow: false };
+	}
+	// Solo, lo que el ultimo snapshot declara superado, cuando pesa lo bastante.
+	const superseded = lastSnapshot > 0 ? items.slice(0, lastSnapshot).filter((item) => item.snapshot) : [];
+	const pending = superseded.reduce((sum, item) => sum + item.tokens, 0);
+	return pending >= cfg.memoryAdvance
+		? { ...state, dropped: new Set([...state.dropped, ...superseded.map((item) => item.key)]), memoryAdvances: state.memoryAdvances + 1 }
+		: state;
+}
+
+/** La frontera del reasoning: nunca toca los `keep` mas recientes y solo avanza por lotes. */
+function reasoningFrontier(state: PruneState, reasoning: readonly number[], input: any[], cfg: PruneConfig): PruneState {
+	const boundary = reasoning.length - cfg.keep;
+	// La historia encogio (compactacion, /tree, sesion reemplazada): una frontera vieja podaria la ventana protegida.
+	if (boundary <= 0) return state.frontier === 0 ? state : { ...state, frontier: 0 };
+	// Nunca por delante de la frontera valida actual, por el mismo motivo.
+	const frontier = Math.min(state.frontier, boundary);
+	if (boundary <= frontier) return frontier === state.frontier ? state : { ...state, frontier };
+	const pending = reasoning.slice(frontier, boundary).reduce((sum, index) => sum + tokensOf(input[index]), 0);
+	return pending >= cfg.advance ? { ...state, frontier: boundary, advances: state.advances + 1 } : { ...state, frontier };
+}
+
+export type RequestPlan = Readonly<{ state: PruneState; drop: ReadonlySet<number> }>;
+
+/** Un request como transicion pura: el estado siguiente y los indices del payload que se retiran. */
+export function planRequest(state: PruneState, input: any[], cfg: PruneConfig): RequestPlan {
+	const afterMemory = cfg.memory ? memoryStep(state, input, cfg) : state;
+	const memory = cfg.memory ? memoryItems(input) : [];
+	const memoryDrops = memory.filter((item) => afterMemory.dropped.has(item.key));
+	const withMemory: PruneState = cfg.memory
+		? {
+			...afterMemory,
+			inContext: memory.filter((item) => !afterMemory.dropped.has(item.key)).reduce((sum, item) => sum + item.tokens, 0),
+			retired: new Map([...afterMemory.retired, ...memoryDrops.map((item) => [item.key, item.tokens] as const)]),
+		}
+		: afterMemory;
+	if (!cfg.reasoning) return { state: withMemory, drop: new Set(memoryDrops.map((item) => item.index)) };
+	const reasoning = input.flatMap((item, i) => item?.type === "reasoning" ? [i] : []);
+	const next = reasoningFrontier(withMemory, reasoning, input, cfg);
+	return { state: next, drop: new Set([...memoryDrops.map((item) => item.index), ...reasoning.slice(0, next.frontier)]) };
+}
+
 export default function (pi: ExtensionAPI) {
 	// Calentamiento de cache y aviso al cambiar de modelo: ver cache-guard.ts.
 	// Van antes de PI_PRUNE=0, que apaga solo las podas.
 	installCacheGuard(pi);
 	if (!CFG.enabled) return;
 
-	// Ordinal del ultimo reasoning podado. La historia es append-only, asi que
-	// los N primeros items de reasoning son estables y el ordinal no se desplaza.
-	// Items de memoria ya retirados, por contenido. Limpieza pedida desde /memory: se aplica en el siguiente request.
-	// Tokens de memoria retirados en esta sesion, por contenido (no se cuentan dos veces).
-	const state = {
-		frontier: 0,
-		droppedMemory: new Set<string>(),
-		memoryNow: false,
-		lastDropped: 0,
-		lastTokens: 0,
-		advances: 0,
-		memoryAdvances: 0,
-		retired: new Map<string, number>(),
-		inContext: 0,
-	};
+	// La unica celda que cambia: guarda el estado vigente, que siempre se reemplaza por uno nuevo.
+	const session = { state: initialState() };
 
 	/**
-	 * La linea "memory" arriba del editor es de pi-memory: dice cuantos recuerdos
-	 * tiene el modelo y cuantos se trajeron para el prompt. Aqui solo se ven los
-	 * tokens de snapshots y lo podado, con PI_PRUNE_DEBUG=1.
+	 * La linea "memory" arriba del editor es de pi-memory. Aqui solo se ven los tokens de snapshots
+	 * y lo podado, con PI_PRUNE_DEBUG=1.
 	 */
 	const showStatus = (ctx: any): void => {
 		if (!CFG.memory || !CFG.debug) return;
-		const pruned = [...state.retired.values()].reduce((sum, tokens) => sum + tokens, 0);
-		const parts = [`memory snapshots ${short(state.inContext)}`];
+		const { inContext, memoryNow } = session.state;
+		const pruned = retiredTokens(session.state);
+		const parts = [`memory snapshots ${short(inContext)}`];
 		if (pruned) parts.push(`-${short(pruned)} pruned`);
-		if (state.memoryNow) parts.push("prune queued");
-		setMode(ctx, "prune", state.inContext || pruned || state.memoryNow ? parts.join(" · ") : undefined);
+		if (memoryNow) parts.push("prune queued");
+		setMode(ctx, "prune", inContext || pruned || memoryNow ? parts.join(" · ") : undefined);
 	};
 
 	pi.on("session_start", (_event: any, ctx: any) => {
-		state.frontier = 0;
-		state.droppedMemory = new Set();
-		state.memoryNow = false;
-		state.lastDropped = 0;
-		state.lastTokens = 0;
-		state.advances = 0;
-		state.memoryAdvances = 0;
-		state.retired = new Map();
-		state.inContext = 0;
+		session.state = initialState();
 		showStatus(ctx);
 	});
-
-	/** Decide que memoria se retira en este request. Solo crece en un lote o a mano. */
-	const pruneMemory = (input: any[]): void => {
-		const items = memoryItems(input).filter((item) => !state.droppedMemory.has(item.key));
-		const lastSnapshot = items.map((item) => item.snapshot).lastIndexOf(true);
-		if (state.memoryNow) {
-			state.memoryNow = false;
-			// Todo menos el ultimo snapshot (las reglas vigentes) y el ultimo recall.
-			const keep = new Set([items[lastSnapshot]?.key, items.at(-1)?.key]);
-			const gone = items.filter((item) => !keep.has(item.key));
-			if (gone.length) {
-				for (const item of gone) state.droppedMemory.add(item.key);
-				state.memoryAdvances++;
-			}
-			return;
-		}
-		// Solo, lo que el ultimo snapshot declara superado, cuando pesa lo bastante.
-		const superseded = lastSnapshot > 0 ? items.slice(0, lastSnapshot).filter(item => item.snapshot) : [];
-		const pending = superseded.reduce((sum, item) => sum + item.tokens, 0);
-		if (pending >= CFG.memoryAdvance) {
-			for (const item of superseded) state.droppedMemory.add(item.key);
-			state.memoryAdvances++;
-		}
-	};
 
 	pi.on("before_provider_request", (event: any, ctx: any) => {
 		try {
 			const payload = event.payload;
 			const input = payload?.input;
 			if (!Array.isArray(input)) return undefined; // solo payloads estilo Responses API
-
-			const drop = new Set<number>();
-
-			if (CFG.memory) {
-				pruneMemory(input);
-				state.inContext = 0;
-				for (const item of memoryItems(input)) {
-					if (state.droppedMemory.has(item.key)) {
-						drop.add(item.index);
-						state.retired.set(item.key, item.tokens);
-					} else state.inContext += item.tokens;
-				}
-				showStatus(ctx);
-			}
-
-			if (CFG.reasoning) {
-				const reasoning = input.flatMap((item, i) => item?.type === "reasoning" ? [i] : []);
-				// La ventana protegida son los `keep` mas recientes: esos nunca se tocan.
-				const boundary = reasoning.length - CFG.keep;
-				if (boundary <= 0) {
-					// La historia encogio (compactacion, /tree, sesion reemplazada): una
-					// frontera vieja podaria la ventana protegida. Retrocede con ella.
-					state.frontier = 0;
-				} else {
-					// Nunca por delante de la frontera valida actual, por el mismo motivo.
-					if (state.frontier > boundary) state.frontier = boundary;
-					if (boundary > state.frontier) {
-						const pending = reasoning.slice(state.frontier, boundary).reduce((sum, index) => sum + tokensOf(input[index]), 0);
-						if (pending >= CFG.advance) {
-							state.frontier = boundary;
-							state.advances++;
-						}
-					}
-					for (const index of reasoning.slice(0, state.frontier)) drop.add(index);
-				}
-			}
-
-			if (!drop.size) return undefined;
+			const plan = planRequest(session.state, input, CFG);
+			session.state = plan.state;
+			showStatus(ctx);
+			if (!plan.drop.size) return undefined;
 			// One pass over the payload: this runs on every provider request.
-			const pruned: unknown[] = [];
+			const kept: unknown[] = [];
 			const freed = input.reduce((sum: number, item: unknown, i: number) => {
-				if (drop.has(i)) return sum + tokensOf(item);
-				pruned.push(item);
+				if (plan.drop.has(i)) return sum + tokensOf(item);
+				kept.push(item);
 				return sum;
 			}, 0);
-
-			state.lastDropped = drop.size;
-			state.lastTokens = freed;
-			if (CFG.debug && ctx?.hasUI) {
-				ctx.ui.setStatus("prune", `prune: -${freed} tok (${drop.size} items)`);
-			}
-			return { ...payload, input: pruned };
+			if (CFG.debug && ctx?.hasUI) ctx.ui.setStatus("prune", `prune: -${freed} tok (${plan.drop.size} items)`);
+			return { ...payload, input: kept };
 		} catch {
 			return undefined; // ante cualquier duda, payload intacto
 		}
 	});
 
-	// /memory (pi-memory) es donde una persona llega a esto: el panel (tecla p) y
-	// `/memory prune`. Cada extension tiene su propio grafo de modulos, asi que se
-	// encuentran en un simbolo del proceso.
+	// /memory (pi-memory) es donde una persona llega a esto: el panel (tecla p) y `/memory prune`.
+	// Cada extension tiene su propio grafo de modulos, asi que se encuentran en un simbolo del proceso.
 	const space = globalThis as Record<symbol, any>;
 	space[Symbol.for("prjct.context-prune")] = {
 		memory: {
 			queue: (ctx: any) => {
 				if (!CFG.memory) return;
-				state.memoryNow = true;
+				session.state = queueMemoryPrune(session.state);
 				showStatus(ctx);
 			},
 			status: () => ({
-				inContext: state.inContext,
-				pruned: [...state.retired.values()].reduce((sum, tokens) => sum + tokens, 0),
-				queued: state.memoryNow,
+				inContext: session.state.inContext,
+				pruned: retiredTokens(session.state),
+				queued: session.state.memoryNow,
 			}),
 		},
 	};

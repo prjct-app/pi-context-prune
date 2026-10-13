@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 — 2026-10-12
+
+- Refactor: pruning state is one immutable value. Each provider request is a pure transition (`planRequest`) that returns the next state and the payload items to drop; the previous state is never changed. Tests cover that the input state stays untouched.
+
 ## 0.1.4 — 2026-10-12
 
 - Fix: with `PI_PRUNE_DEBUG=1` the status line referenced a variable that no longer existed (introduced in 0.1.3). A regression test now runs the debug path.
